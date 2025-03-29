@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Users, Search, ChevronDown, UserPlus } from 'lucide-react';
+import { Users, Search, ChevronDown, UserPlus, ArrowUp, ArrowDown, Download, Calendar } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 type ClassCount = {
   class_id: string;
@@ -21,6 +22,7 @@ type ChildDetails = {
   parent_name: string;
   class_section: string;
   teacher_name: string | null;
+  age: number;
 };
 
 type SectionOption = {
@@ -29,6 +31,22 @@ type SectionOption = {
   current_count: number;
   max_capacity: number;
 };
+
+type DailyRegistration = {
+  registration_date: string;
+  total_registrations: number;
+};
+
+type RegistrationReport = {
+  child_name: string;
+  age: number;
+  parent_name: string;
+  phone_number: string;
+  class_section: string;
+  registration_date: string;
+};
+
+type SortField = 'full_name' | 'age' | 'parent_name' | 'class_section' | 'teacher_name';
 
 export function AdminDashboard() {
   const { code } = useParams<{ code: string }>();
@@ -45,6 +63,10 @@ export function AdminDashboard() {
   const [selectedChild, setSelectedChild] = useState<string | null>(null);
   const [newSectionId, setNewSectionId] = useState<string>('');
   const [isUpdating, setIsUpdating] = useState(false);
+  const [sortField, setSortField] = useState<SortField>('full_name');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [dailyRegistrations, setDailyRegistrations] = useState<DailyRegistration[]>([]);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Verify admin access
   useEffect(() => {
@@ -52,6 +74,114 @@ export function AdminDashboard() {
       window.location.href = '/';
     }
   }, [code]);
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const fetchData = async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+
+      // Fetch class counts
+      const { data: classes, error: classError } = await supabase
+        .rpc('get_class_counts');
+
+      if (classError) throw classError;
+
+      // Fetch sections for each class
+      const classesWithSections = await Promise.all((classes || []).map(async (cls) => {
+        const { data: sections, error: sectionError } = await supabase
+          .rpc('get_section_counts', { p_class_id: cls.class_id });
+
+        if (sectionError) throw sectionError;
+
+        return {
+          ...cls,
+          sections: sections || []
+        };
+      }));
+
+      setClassCounts(classesWithSections);
+
+      // Fetch daily registration counts
+      const { data: registrations, error: registrationError } = await supabase
+        .rpc('get_daily_registration_count');
+
+      if (registrationError) throw registrationError;
+      setDailyRegistrations(registrations || []);
+
+    } catch (err) {
+      console.error('Error fetching data:', err);
+      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleExportRegistrations = async (date: string) => {
+    try {
+      setIsExporting(true);
+
+      const { data, error } = await supabase
+        .rpc('get_registration_report', { p_date: date });
+
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        throw new Error('No data available for export');
+      }
+
+      // Format data for Excel
+      const formattedData = data.map(row => ({
+        'Child Name': row.child_name,
+        'Age': row.age,
+        'Parent Name': row.parent_name,
+        'Phone Number': row.phone_number,
+        'Class-Section': row.class_section,
+        'Registration Date': new Date(row.registration_date).toLocaleDateString('en-IN', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric'
+        })
+      }));
+
+      // Create workbook
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(formattedData);
+
+      // Auto-size columns
+      const colWidths = [
+        { wch: 30 }, // Child Name
+        { wch: 5 },  // Age
+        { wch: 25 }, // Parent Name
+        { wch: 15 }, // Phone Number
+        { wch: 20 }, // Class-Section
+        { wch: 15 }  // Registration Date
+      ];
+      ws['!cols'] = colWidths;
+
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(wb, ws, 'Registrations');
+
+      // Generate filename
+      const formattedDate = new Date(date).toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+      }).split('/').join('');
+
+      // Save file
+      XLSX.writeFile(wb, `Registrations_${formattedDate}.xlsx`);
+
+    } catch (err) {
+      console.error('Export error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to export data');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   // Fetch available sections when a child is selected
   useEffect(() => {
@@ -76,41 +206,28 @@ export function AdminDashboard() {
     fetchAvailableSections();
   }, [selectedChild]);
 
-  // Fetch class counts
-  useEffect(() => {
-    const fetchClassCounts = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
 
-        const { data: classes, error: classError } = await supabase
-          .rpc('get_class_counts');
+  const sortData = (data: ChildDetails[]) => {
+    return [...data].sort((a, b) => {
+      const multiplier = sortDirection === 'asc' ? 1 : -1;
+      const aValue = a[sortField] || '';
+      const bValue = b[sortField] || '';
 
-        if (classError) throw classError;
-
-        const classesWithSections = await Promise.all((classes || []).map(async (cls) => {
-          const { data: sections, error: sectionError } = await supabase
-            .rpc('get_section_counts', { p_class_id: cls.class_id });
-
-          if (sectionError) throw sectionError;
-
-          return {
-            ...cls,
-            sections: sections || []
-          };
-        }));
-
-        setClassCounts(classesWithSections);
-      } catch (err) {
-        console.error('Error fetching class counts:', err);
-        setError('Failed to load class data');
-      } finally {
-        setIsLoading(false);
+      if (sortField === 'age') {
+        return multiplier * ((a.age || 0) - (b.age || 0));
       }
-    };
 
-    fetchClassCounts();
-  }, []);
+      return multiplier * String(aValue).localeCompare(String(bValue));
+    });
+  };
 
   const handleClassClick = (className: string) => {
     setSelectedClass(selectedClass === className ? null : className);
@@ -201,10 +318,72 @@ export function AdminDashboard() {
     }
   };
 
+  const renderSortIcon = (field: SortField) => {
+    if (sortField !== field) {
+      return <ChevronDown className="h-4 w-4 text-gray-400" />;
+    }
+    return sortDirection === 'asc' ? 
+      <ArrowUp className="h-4 w-4 text-indigo-600" /> : 
+      <ArrowDown className="h-4 w-4 text-indigo-600" />;
+  };
+
+  const renderTableHeader = () => (
+    <tr>
+      <th 
+        scope="col" 
+        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+        onClick={() => handleSort('full_name')}
+      >
+        <div className="flex items-center gap-2">
+          Child Name {renderSortIcon('full_name')}
+        </div>
+      </th>
+      <th 
+        scope="col" 
+        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+        onClick={() => handleSort('age')}
+      >
+        <div className="flex items-center gap-2">
+          Age {renderSortIcon('age')}
+        </div>
+      </th>
+      <th 
+        scope="col" 
+        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+        onClick={() => handleSort('parent_name')}
+      >
+        <div className="flex items-center gap-2">
+          Parent Name {renderSortIcon('parent_name')}
+        </div>
+      </th>
+      <th 
+        scope="col" 
+        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+        onClick={() => handleSort('class_section')}
+      >
+        <div className="flex items-center gap-2">
+          Class-Section {renderSortIcon('class_section')}
+        </div>
+      </th>
+      <th 
+        scope="col" 
+        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+        onClick={() => handleSort('teacher_name')}
+      >
+        <div className="flex items-center gap-2">
+          Teacher Name {renderSortIcon('teacher_name')}
+        </div>
+      </th>
+    </tr>
+  );
+
   const renderChildRow = (child: ChildDetails) => (
     <tr key={child.child_id} className="hover:bg-gray-50">
       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
         {child.full_name}
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+        {child.age}
       </td>
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         {child.parent_name}
@@ -291,8 +470,8 @@ export function AdminDashboard() {
         </div>
       )}
 
-      {/* Search Section */}
-      <div className="mb-12 bg-white rounded-lg shadow-md p-6">
+      {/* Search Section - Moved to top */}
+      <div className="mb-8 bg-white rounded-lg shadow-md p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-4">Search Children</h2>
         <div className="flex gap-4 mb-6">
           <div className="flex-1 relative">
@@ -315,9 +494,19 @@ export function AdminDashboard() {
           <button
             onClick={handleSearch}
             disabled={isSearching || !searchTerm.trim()}
-            className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
           >
-            {isSearching ? 'Searching...' : 'Search'}
+            {isSearching ? (
+              <>
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                <span>Searching...</span>
+              </>
+            ) : (
+              <>
+                <Search className="h-5 w-5" />
+                <span>Search</span>
+              </>
+            )}
           </button>
         </div>
 
@@ -329,23 +518,10 @@ export function AdminDashboard() {
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
-                  <tr>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Child Name
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Parent Name
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Class-Section
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Teacher Name
-                    </th>
-                  </tr>
+                  {renderTableHeader()}
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {searchResults.map(child => renderChildRow(child))}
+                  {sortData(searchResults).map(child => renderChildRow(child))}
                 </tbody>
               </table>
             </div>
@@ -353,73 +529,120 @@ export function AdminDashboard() {
         )}
       </div>
 
-      {/* Dashboard Section */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {classCounts.map(classData => (
-          <div key={classData.class_id} className="space-y-4">
-            <button
-              onClick={() => handleClassClick(classData.class_name)}
-              className="w-full bg-white rounded-lg shadow-md p-6 text-left hover:bg-gray-50 transition"
-            >
-              <div className="flex justify-between items-center">
-                <h3 className="text-lg font-semibold text-gray-900">{classData.class_name}</h3>
-                <ChevronDown 
-                  className={`h-5 w-5 text-gray-500 transition-transform ${
-                    selectedClass === classData.class_name ? 'transform rotate-180' : ''
-                  }`}
-                />
-              </div>
-              <p className="text-3xl font-bold text-indigo-600 mt-2">{classData.total_count}</p>
-              <p className="text-sm text-gray-600">Total Count</p>
-            </button>
+      {/* Class Counts Section */}
+      <div className="mb-8">
+        <h2 className="text-xl font-semibold text-gray-900 mb-4">Class Overview</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {classCounts.map(classData => (
+            <div key={classData.class_id} className="space-y-4">
+              <button
+                onClick={() => handleClassClick(classData.class_name)}
+                className="w-full bg-white rounded-lg shadow-md p-6 text-left hover:bg-gray-50 transition"
+              >
+                <div className="flex justify-between items-center">
+                  <h3 className="text-lg font-semibold text-gray-900">{classData.class_name}</h3>
+                  <ChevronDown 
+                    className={`h-5 w-5 text-gray-500 transition-transform ${
+                      selectedClass === classData.class_name ? 'transform rotate-180' : ''
+                    }`}
+                  />
+                </div>
+                <p className="text-3xl font-bold text-indigo-600 mt-2">{classData.total_count}</p>
+                <p className="text-sm text-gray-600">Total Students</p>
+              </button>
 
-            {selectedClass === classData.class_name && (
-              <div className="space-y-2">
-                {classData.sections.map(section => (
-                  <div key={section.section_id}>
+              {selectedClass === classData.class_name && (
+                <div className="space-y-2">
+                  {classData.sections.map(section => (
+                    <div key={section.section_id}>
+                      <button
+                        onClick={() => handleSectionClick(section.section_id)}
+                        className="w-full bg-indigo-50 rounded-lg p-4 text-left hover:bg-indigo-100 transition"
+                      >
+                        <div className="flex justify-between items-center">
+                          <h4 className="font-medium text-indigo-900">
+                            {section.display_name}
+                          </h4>
+                          <span className="text-indigo-600 font-semibold">{section.current_count}</span>
+                        </div>
+                      </button>
+
+                      {selectedSection === section.section_id && sectionChildren.length > 0 && (
+                        <div className="mt-2 bg-white rounded-lg shadow p-4">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              {renderTableHeader()}
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {sortData(sectionChildren).map(child => renderChildRow(child))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Daily Registration Summary - Moved to bottom */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-xl font-semibold text-gray-900 mb-4">Daily Registration Summary</h2>
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Date
+                </th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Total Registrations
+                </th>
+                <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {dailyRegistrations.map((day) => (
+                <tr key={day.registration_date} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {new Date(day.registration_date).toLocaleDateString('en-IN', {
+                      day: '2-digit',
+                      month: 'short',
+                      year: 'numeric'
+                    })}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {day.total_registrations}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                     <button
-                      onClick={() => handleSectionClick(section.section_id)}
-                      className="w-full bg-indigo-50 rounded-lg p-4 text-left hover:bg-indigo-100 transition"
+                      onClick={() => handleExportRegistrations(day.registration_date)}
+                      disabled={isExporting}
+                      className="text-indigo-600 hover:text-indigo-900 flex items-center gap-2 ml-auto"
                     >
-                      <div className="flex justify-between items-center">
-                        <h4 className="font-medium text-indigo-900">
-                          {section.display_name}
-                        </h4>
-                        <span className="text-indigo-600 font-semibold">{section.current_count}</span>
-                      </div>
+                      {isExporting ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>
+                          <span>Exporting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Download className="h-4 w-4" />
+                          <span>Export</span>
+                        </>
+                      )}
                     </button>
-
-                    {selectedSection === section.section_id && sectionChildren.length > 0 && (
-                      <div className="mt-2 bg-white rounded-lg shadow p-4">
-                        <table className="min-w-full divide-y divide-gray-200">
-                          <thead className="bg-gray-50">
-                            <tr>
-                              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                Child Name
-                              </th>
-                              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                Parent Name
-                              </th>
-                              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                Class-Section
-                              </th>
-                              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                Teacher Name
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody className="bg-white divide-y divide-gray-200">
-                            {sectionChildren.map(child => renderChildRow(child))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
