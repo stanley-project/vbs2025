@@ -1,14 +1,14 @@
-// src/components/TeacherAssignment.tsx
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Loader2, Plus, X, ArrowUpDown } from 'lucide-react';
+import { Users, Search, ChevronDown, UserPlus, ArrowUp, ArrowDown, AlertCircle, Loader2 } from 'lucide-react';
 
+// Define types
 type TeacherAssignment = {
   teacher_name: string;
   class_section: string;
   student_count: number;
-  class_name: string; // Added class name
+  is_primary: boolean;
 };
 
 type Teacher = {
@@ -18,8 +18,9 @@ type Teacher = {
 
 type Section = {
   id: string;
-  display_name: string;
-  id: string;
+  class_id: string;
+  section_code: string;
+  display_name: string | null;
 };
 
 type SortField = 'teacher_name' | 'class_section' | 'student_count';
@@ -29,7 +30,7 @@ export function TeacherAssignment() {
   const [assignments, setAssignments] = useState<TeacherAssignment[]>([]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedTeacher, setSelectedTeacher] = useState('');
@@ -38,6 +39,11 @@ export function TeacherAssignment() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [sortField, setSortField] = useState<SortField>('teacher_name');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [submitStatus, setSubmitStatus] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [debugInfo, setDebugInfo] = useState<any>(null);
 
   // Verify admin access
   useEffect(() => {
@@ -73,32 +79,19 @@ export function TeacherAssignment() {
 
   const fetchData = async () => {
     try {
-      setLoading(true);
+      setIsLoading(true);
       setError(null);
 
-      // Get teacher assignments using the SQL function
+      // Fetch assignments
       const { data: assignments, error: assignmentError } = await supabase
         .rpc('get_teacher_assignments');
 
       if (assignmentError) {
         throw new Error(`Failed to fetch assignments: ${assignmentError.message}`);
       }
+      setAssignments(assignments || []);
 
-      // Fetch class name for each assignment
-      const assignmentsWithClass = await Promise.all(
-        (assignments || []).map(async (assignment) => {
-          const sectionName = assignment.class_section;
-          const className = sectionName.split('-')[0];
-          return {
-            ...assignment,
-            class_name: className,
-          };
-        })
-      );
-
-      setAssignments(assignmentsWithClass);
-
-      // Fetch available teachers
+      // Fetch teachers
       const { data: teacherData, error: teacherError } = await supabase
         .from('teachers')
         .select('id, name')
@@ -109,40 +102,80 @@ export function TeacherAssignment() {
       }
       setTeachers(teacherData || []);
 
-      // Fetch available sections
+      // Fetch sections with debug logging
       const { data: sectionData, error: sectionError } = await supabase
         .from('class_sections')
-        .select('id, display_name')
+        .select(`
+          id,
+          name,
+          section_code,
+          display_name,
+          class_id,
+          classes (
+            name
+          )
+        `)
         .order('display_name');
 
       if (sectionError) {
         throw new Error(`Failed to fetch sections: ${sectionError.message}`);
       }
-      console.log('Section Data:', sectionData); // Debug log
-      setSections(sectionData || []);
+
+      // Log section data for debugging
+      console.log('Raw section data:', sectionData);
+
+      if (!sectionData || sectionData.length === 0) {
+        setDebugInfo({ message: 'No sections found in database' });
+        setSections([]);
+        return;
+      }
+
+      const transformedSections = sectionData.map(section => {
+        const displayName = section.display_name || 
+          `${section.classes?.name || section.name} - ${section.section_code}`;
+        
+        return {
+          id: section.id,
+          class_id: section.class_id,
+          section_code: section.section_code,
+          display_name: displayName
+        };
+      });
+
+      console.log('Transformed sections:', transformedSections);
+      setSections(transformedSections);
 
     } catch (err) {
       console.error('Error in fetchData:', err);
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+      setDebugInfo(err);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
   const handleAssignTeacher = async () => {
     if (!selectedTeacher || !selectedSection) {
-      setError('Please select both teacher and section');
+      setSubmitStatus({
+        type: 'error',
+        message: 'Please select both teacher and section'
+      });
       return;
     }
 
     try {
       setIsSubmitting(true);
       setError(null);
+      setSubmitStatus(null);
 
       const exists = await verifyAssignment(selectedTeacher, selectedSection);
-      
+
       if (exists) {
-        throw new Error('Teacher is already assigned to this section');
+        setSubmitStatus({
+          type: 'error',
+          message: 'Teacher is already assigned to this section'
+        });
+        return;
       }
 
       const { error: insertError } = await supabase
@@ -157,6 +190,11 @@ export function TeacherAssignment() {
         throw new Error(`Failed to assign teacher: ${insertError.message}`);
       }
 
+      setSubmitStatus({
+        type: 'success',
+        message: 'Teacher assigned successfully'
+      });
+
       setSelectedTeacher('');
       setSelectedSection('');
       setIsPrimary(false);
@@ -165,7 +203,10 @@ export function TeacherAssignment() {
 
     } catch (err) {
       console.error('Assignment error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to assign teacher');
+      setSubmitStatus({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to assign teacher'
+      });
     } finally {
       setIsSubmitting(false);
     }
@@ -180,30 +221,45 @@ export function TeacherAssignment() {
     }
   };
 
-  const sortedAssignments = [...assignments].sort((a, b) => {
-    // First, sort by class name
-    const classComparison = a.class_section.localeCompare(b.class_section);
-    if (classComparison !== 0) {
-      return classComparison;
+  const getSortedAssignments = () => {
+    return [...assignments].sort((a, b) => {
+      const multiplier = sortDirection === 'asc' ? 1 : -1;
+
+      switch (sortField) {
+        case 'teacher_name':
+          return multiplier * a.teacher_name.localeCompare(b.teacher_name);
+        case 'class_section':
+          return multiplier * a.class_section.localeCompare(b.class_section);
+        case 'student_count':
+          return multiplier * (a.student_count - b.student_count);
+        default:
+          return 0;
+      }
+    });
+  };
+
+  const getTotalStudents = () => {
+    return assignments.reduce((total, assignment) => total + assignment.student_count, 0);
+  };
+
+  const renderSortIcon = (field: SortField) => {
+    if (sortField !== field) {
+      return <ChevronDown className="h-4 w-4 text-gray-400" />;
     }
-
-    // If class names are the same, sort by section
-    return a.class_section.localeCompare(b.class_section);
-  });
-
-  const getTotalStudents = (teacherName: string) => {
-    return assignments
-      .filter(assignment => assignment.teacher_name === teacherName)
-      .reduce((total, assignment) => total + assignment.student_count, 0);
+    return sortDirection === 'asc' ?
+      <ArrowUp className="h-4 w-4 text-indigo-600" /> :
+      <ArrowDown className="h-4 w-4 text-indigo-600" />;
   };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
       </div>
     );
   }
+
+  const sortedAssignments = getSortedAssignments();
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -213,7 +269,7 @@ export function TeacherAssignment() {
           onClick={() => setShowAddForm(true)}
           className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-2"
         >
-          <Plus className="h-5 w-5" />
+          <UserPlus className="h-5 w-5" />
           <span>Assign Teacher</span>
         </button>
       </div>
@@ -229,12 +285,38 @@ export function TeacherAssignment() {
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold">New Assignment</h2>
             <button
-              onClick={() => setShowAddForm(false)}
+              onClick={() => {
+                setShowAddForm(false);
+                setSubmitStatus(null);
+              }}
               className="text-gray-500 hover:text-gray-700"
             >
-              <X className="h-5 w-5" />
+              ×
             </button>
           </div>
+
+          {submitStatus && (
+            <div className={`mb-4 p-4 rounded-md ${
+              submitStatus.type === 'success' 
+                ? 'bg-green-50 border border-green-200 text-green-700' 
+                : 'bg-red-50 border border-red-200 text-red-700'
+            }`}>
+              <div className="flex items-center gap-2">
+                {submitStatus.type === 'error' && <AlertCircle className="h-5 w-5" />}
+                <p>{submitStatus.message}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Debug Info */}
+          {debugInfo && (
+            <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
+              <p className="text-yellow-800 font-mono text-sm">
+                Debug Info: {JSON.stringify(debugInfo, null, 2)}
+              </p>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -244,6 +326,7 @@ export function TeacherAssignment() {
                 value={selectedTeacher}
                 onChange={(e) => setSelectedTeacher(e.target.value)}
                 className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
+                disabled={isSubmitting}
               >
                 <option value="">Select teacher...</option>
                 {teachers.map(teacher => (
@@ -261,14 +344,18 @@ export function TeacherAssignment() {
                 value={selectedSection}
                 onChange={(e) => setSelectedSection(e.target.value)}
                 className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
+                disabled={isSubmitting}
               >
-                <option value="">Select section...</option>
+                <option value="">Select class-section...</option>
                 {sections.map(section => (
                   <option key={section.id} value={section.id}>
                     {section.display_name}
                   </option>
                 ))}
               </select>
+              {sections.length === 0 && (
+                <p className="mt-1 text-sm text-red-600">No sections available</p>
+              )}
             </div>
           </div>
           <div className="mt-4">
@@ -278,6 +365,7 @@ export function TeacherAssignment() {
                 checked={isPrimary}
                 onChange={(e) => setIsPrimary(e.target.checked)}
                 className="rounded border-gray-300 text-indigo-600 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
+                disabled={isSubmitting}
               />
               <span className="text-sm text-gray-700">Set as primary teacher</span>
             </label>
@@ -289,9 +377,15 @@ export function TeacherAssignment() {
               className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
             >
               {isSubmitting ? (
-                <Loader2 className="h-5 w-5 animate-spin" />
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <span>Assigning...</span>
+                </>
               ) : (
-                'Assign Teacher'
+                <>
+                  <UserPlus className="h-5 w-5" />
+                  <span>Assign Teacher</span>
+                </>
               )}
             </button>
           </div>
@@ -302,34 +396,34 @@ export function TeacherAssignment() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th 
-                scope="col" 
+              <th
+                scope="col"
                 className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
                 onClick={() => handleSort('teacher_name')}
               >
                 <div className="flex items-center gap-2">
                   Teacher Name
-                  <ArrowUpDown className="h-4 w-4" />
+                  {renderSortIcon('teacher_name')}
                 </div>
               </th>
-              <th 
-                scope="col" 
+              <th
+                scope="col"
                 className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
                 onClick={() => handleSort('class_section')}
               >
                 <div className="flex items-center gap-2">
                   Class Section
-                  <ArrowUpDown className="h-4 w-4" />
+                  {renderSortIcon('class_section')}
                 </div>
               </th>
-              <th 
-                scope="col" 
+              <th
+                scope="col"
                 className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
                 onClick={() => handleSort('student_count')}
               >
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-end gap-2">
                   Students
-                  <ArrowUpDown className="h-4 w-4" />
+                  {renderSortIcon('student_count')}
                 </div>
               </th>
             </tr>
@@ -346,6 +440,11 @@ export function TeacherAssignment() {
                 <tr key={`${assignment.teacher_name}-${assignment.class_section}-${index}`} className="hover:bg-gray-50">
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                     {assignment.teacher_name}
+                    {assignment.is_primary && (
+                      <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                        Primary
+                      </span>
+                    )}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {assignment.class_section}
@@ -357,16 +456,20 @@ export function TeacherAssignment() {
               ))
             )}
           </tbody>
+          {sortedAssignments.length > 0 && (
+            <tfoot className="bg-gray-50">
+              <tr>
+                <td colSpan={2} className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 text-right">
+                  Total Students:
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 text-right">
+                  {getTotalStudents()}
+                </td>
+              </tr>
+            </tfoot>
+          )}
         </table>
-        {sortedAssignments.length > 0 && (
-          <div className="px-6 py-4 bg-gray-50 text-right">
-            <span className="text-sm font-medium text-gray-700">
-              Total Students: {getTotalStudents(sortedAssignments[0].teacher_name)}
-            </span>
-          </div>
-        )}
       </div>
     </div>
   );
 }
-  
